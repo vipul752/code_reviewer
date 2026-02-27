@@ -1,83 +1,77 @@
+import { GoogleGenAI, Type } from "@google/genai";
+import "dotenv/config";
 import fs from "fs";
 import path from "path";
-import { GoogleGenAI, Type } from "@google/genai";
-import dotenv from "dotenv";
 
-dotenv.config();
+
 
 const ai = new GoogleGenAI({});
 
-// Retry helper with exponential backoff for rate limits
-async function withRetry(fn, maxRetries = 5, baseDelay = 5000) {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (error.status === 429 && attempt < maxRetries - 1) {
-        // Extract retry delay from error if available, or use exponential backoff
-        const retryMatch = error.message?.match(/retry in (\d+(?:\.\d+)?)/i);
-        const delay = retryMatch
-          ? Math.ceil(parseFloat(retryMatch[1]) * 1000) + 1000
-          : baseDelay * Math.pow(2, attempt);
-        console.log(
-          `Rate limited. Retrying in ${Math.round(delay / 1000)}s... (attempt ${attempt + 1}/${maxRetries})`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      } else {
-        throw error;
-      }
-    }
-  }
-}
+
 
 async function listFiles({ directory }) {
   const files = [];
-  const extensions = [".js", ".html", ".css", ".json", ".md"];
+  const extensions = [".js", ".jsx", ".ts", ".tsx", ".html", ".css"];
 
   function scan(dir) {
     const items = fs.readdirSync(dir);
 
     for (const item of items) {
-      const itemPath = path.join(dir, item);
+      const fullPath = path.join(dir, item);
 
-      if (itemPath.includes("node_modules") || itemPath.includes(".git"))
+      if (
+        fullPath.includes("node_modules") ||
+        fullPath.includes("dist") ||
+        fullPath.includes("build")
+      )
         continue;
-      const stat = fs.statSync(itemPath);
+
+      const stat = fs.statSync(fullPath);
 
       if (stat.isDirectory()) {
-        scan(itemPath);
-      } else if (extensions.includes(path.extname(item))) {
-        files.push(itemPath);
+        scan(fullPath);
+      } else if (stat.isFile()) {
+        const ext = path.extname(item);
+        if (extensions.includes(ext)) {
+          files.push(fullPath);
+        }
       }
     }
   }
 
   scan(directory);
-  console.log(`Found ${files.length} file`);
-  return files;
+  console.log(`Found ${files.length} files`);
+  return { files };
 }
 
-async function readFile({ filePath }) {
-  const content = fs.readFileSync(filePath, "utf-8");
-  console.log(`reading file ${filePath}`);
-  return content;
+async function readFile({ file_path }) {
+  const content = fs.readFileSync(file_path, "utf-8");
+  console.log(`Reading: ${file_path}`);
+  return { content };
 }
 
-async function writeFile({ filePath, content }) {
-  fs.writeFileSync(filePath, content, "utf-8");
-  console.log(`writing file ${filePath}`);
+async function writeFile({ file_path, content }) {
+  fs.writeFileSync(file_path, content, "utf-8");
+  console.log(`✍️  Fixed: ${file_path}`);
   return { success: true };
 }
 
+
+const tools = {
+  list_files: listFiles,
+  read_file: readFile,
+  write_file: writeFile,
+};
+
 const listFilesTool = {
-  name: "listFiles",
-  description: "List all files in a directory",
+  name: "list_files",
+  description: "Get all JavaScript files in a directory",
   parameters: {
     type: Type.OBJECT,
     properties: {
       directory: {
         type: Type.STRING,
-        description: "The directory to scan for files",
+        description: "Directory path to scan",
       },
     },
     required: ["directory"],
@@ -85,143 +79,129 @@ const listFilesTool = {
 };
 
 const readFileTool = {
-  name: "readFile",
-  description: "Read the content of a file",
+  name: "read_file",
+  description: "Read a file's content",
   parameters: {
     type: Type.OBJECT,
     properties: {
-      filePath: {
+      file_path: {
         type: Type.STRING,
-        description: "The path of the file to read",
+        description: "Path to the file",
       },
     },
-    required: ["filePath"],
+    required: ["file_path"],
   },
 };
 
 const writeFileTool = {
-  name: "writeFile",
-  description: "Write content to a file",
+  name: "write_file",
+  description: "Write fixed content back to a file",
   parameters: {
     type: Type.OBJECT,
     properties: {
-      filePath: {
+      file_path: {
         type: Type.STRING,
-        description: "The path of the file to write",
+        description: "Path to the file to write",
       },
       content: {
         type: Type.STRING,
-        description: "The content to write to the file",
+        description: "The fixed/corrected content",
       },
     },
-    required: ["filePath", "content"],
+    required: ["file_path", "content"],
   },
 };
 
-const tools = {
-  listFiles,
-  readFile,
-  writeFile,
-};
 
 export async function runAgent(directoryPath) {
-  console.log(`reviewing ${directoryPath} \n`);
+  console.log(`🔍 Reviewing: ${directoryPath}\n`);
 
-  const history = [
+  const History = [
     {
       role: "user",
       parts: [
-        {
-          text: `Review and fix any issues in the codebase located at ${directoryPath}. You can use the following tools to interact with the file system:\n`,
-        },
+        { text: `Review and fix all JavaScript code in: ${directoryPath}` },
       ],
     },
   ];
 
   while (true) {
-    const result = await withRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: history,
-        config: {
-          systemInstruction: `
-                You are a expert code reviewer and fixer.
+    const result = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: History,
+      config: {
+        systemInstruction: `You are an expert JavaScript code reviewer and fixer.
 
-                **Your Job : **
-                1.use listFiles to explore the codebase and find files that might have issues.
-                2.use readFile to read the content of those files and analyze them for potential issues.
-                3.Analyze for :
+**Your Job:**
+1. Use list_files to get all HTML, CSS, JavaScript, and TypeScript files in the directory
+2. Use read_file to read each file's content
+3. Analyze for:
+   
+   **HTML Issues:**
+   - Missing doctype, meta tags, semantic HTML
+   - Broken links, missing alt attributes
+   - Accessibility issues (ARIA, roles)
+   - Inline styles that should be in CSS
+   
+   **CSS Issues:**
+   - Syntax errors, invalid properties
+   - Browser compatibility issues
+   - Inefficient selectors
+   - Missing vendor prefixes
+   - Unused or duplicate styles
+   
+   **JavaScript Issues:**
+   - BUGS: null/undefined errors, missing returns, type issues, async problems
+   - SECURITY: hardcoded secrets, eval(), XSS risks, injection vulnerabilities
+   - CODE QUALITY: console.logs, unused code, bad naming, complex logic
 
-                **HTML Issue: **
+4. Use write_file to FIX the issues you found (write corrected code back)
+5. After fixing all files, respond with a summary report in TEXT format
 
-                - Broken links: Check for any anchor tags with href attributes that point to non-existent pages or resources.
-                - Missing alt attributes: Ensure that all img tags have alt attributes for accessibility.
-                - Unclosed tags: Look for any HTML tags that are not properly closed, which can lead to rendering issues.
-                - Deprecated tags: Identify any usage of deprecated HTML tags and suggest modern alternatives.
+**Summary Report Format:**
+📊 CODE REVIEW COMPLETE
 
-                **CSS Issue: **
+Total Files Analyzed: X
+Files Fixed: Y
 
-                - Unused CSS: Identify any CSS rules that are defined but not used in the HTML, which can bloat the stylesheet.
-                - Specificity issues: Check for CSS rules that may be overridden due to specificity conflicts, leading to unexpected styling.
-                - Browser compatibility: Look for CSS properties or values that may not be supported across all browsers and suggest alternatives.
+🔴 SECURITY FIXES:
+- file.js:line - Fixed hardcoded API key
+- auth.js:line - Removed eval() usage
 
-                **JavaScript Issue: **
+🟠 BUG FIXES:
+- app.js:line - Added null check for user object
+- index.html:line - Added missing alt attribute
 
-                - Syntax errors: Identify any syntax errors in the JavaScript code that could prevent it from running correctly.
-                - Unused variables/functions: Look for any variables or functions that are defined but not used anywhere in the codebase, which can indicate dead code  
-                - Performance issues: Analyze the code for any potential performance bottlenecks, such as inefficient loops or excessive DOM manipulation.      
-                - If you find any issues, use writeFile to fix them. Provide a brief explanation of the issue and how you fixed it in the content you write to the file.
-                - Always provide a summary of the changes you made and the issues you found in your response after fixing the issues.
-                - If you don't find any issues, provide a summary of the files you reviewed and state that no issues were found.
-                - Do not stop until you have thoroughly reviewed the codebase and fixed all potential issues.
+🟡 CODE QUALITY IMPROVEMENTS:
+- styles.css:line - Removed duplicate styles
+- script.js:line - Removed console.log statements
 
-
-            4. Use writeFile to fix any issues you find, and provide a brief explanation of the issue and how you fixed it in the content you write to the file.
-            5.After all issues are fixed, provide a summary of the changes you made and the issues you found in your response.
-
-            **Summary Report Format: **
-            CODE REVIEW COMPLETE:
-
-            Total Files Reviewed: X 
-            Total Issues Found: Y
-
-            Security Fix:
-            - File Path: Description of the security issue and how it was fixed.
-
-            Performance Fix:
-            - File Path: Description of the performance issue and how it was fixed.
-
-            Code Quality Fix:
-            - File Path: Description of the code quality issue and how it was fixed.
-
-            No issues found:
-            - If no issues were found, provide a summary of the files you reviewed and state that no issues were found. 
-
-            `,
-
-          tools: [listFilesTool, readFileTool, writeFileTool],
-        },
-      }),
-    );
+Be practical and focus on real issues. Actually FIX the code, don't just report.`,
+        tools: [
+          {
+            functionDeclarations: [listFilesTool, readFileTool, writeFileTool],
+          },
+        ],
+      },
+    });
 
     if (result.functionCalls?.length > 0) {
       for (const functionCall of result.functionCalls) {
-        const { name, arguments: args } = functionCall;
+        const { name, args } = functionCall;
 
-        console.log(`${name}`);
-
+        console.log(`📌 ${name}`);
         const toolResponse = await tools[name](args);
 
-        history.push({
+        History.push({
           role: "model",
           parts: [{ functionCall }],
         });
 
-        history.push({
+        History.push({
           role: "user",
           parts: [
             {
-              functionCall: {
+              functionResponse: {
                 name,
                 response: { result: toolResponse },
               },
@@ -230,12 +210,13 @@ export async function runAgent(directoryPath) {
         });
       }
     } else {
-      console.log(`\n` + result.text);
+      console.log("\n" + result.text);
       break;
     }
   }
 }
 
-const directoryPath = process.argv[2] || ".";
 
-await runAgent(directoryPath);
+const directory = process.argv[2] || ".";
+
+await runAgent(directory);
